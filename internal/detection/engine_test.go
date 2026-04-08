@@ -353,7 +353,7 @@ func TestRawIPFetch(t *testing.T) {
 func TestSensitiveStripeKey(t *testing.T) {
 	e := NewEngine()
 	r := e.EvaluateToolCall("test", "test", map[string]interface{}{
-		"data": "Here's the key: sk_test_FAKEKEYFORSECURITYTESTING0",
+		"data": "Here's the key: sk_live_0000000000TESTKEYFAKE00",
 	})
 	if r.Verdict == VerdictPass {
 		t.Error("expected detection for Stripe API key")
@@ -625,7 +625,7 @@ func TestSafeNpmInstall(t *testing.T) {
 
 func TestResponseSensitiveData(t *testing.T) {
 	e := NewEngine()
-	r := e.EvaluateToolResponse("test", "test", "Here is your key: sk_test_FAKEKEYFORSECURITYTESTING1")
+	r := e.EvaluateToolResponse("test", "test", "Here is your key: sk_live_0000000000TESTKEYFAKE01")
 	if r.Verdict == VerdictPass {
 		t.Error("expected detection in tool response for Stripe key")
 	}
