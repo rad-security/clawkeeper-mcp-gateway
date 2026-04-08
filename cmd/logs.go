@@ -2,6 +2,9 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 )
@@ -15,12 +18,25 @@ var logsCmd = &cobra.Command{
 	Use:   "logs",
 	Short: "View gateway event logs",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if logsFollow {
-			fmt.Println("Following gateway logs...")
-		} else {
-			fmt.Printf("Showing last %d log entries.\n", logsLines)
+		follow, _ := cmd.Flags().GetBool("follow")
+		lines, _ := cmd.Flags().GetInt("lines")
+
+		home, _ := os.UserHomeDir()
+		logPath := filepath.Join(home, ".config", "clawkeeper-mcp-gateway", "events.jsonl")
+
+		if follow {
+			// Tail -f equivalent
+			tailCmd := exec.Command("tail", "-f", logPath)
+			tailCmd.Stdout = os.Stdout
+			tailCmd.Stderr = os.Stderr
+			return tailCmd.Run()
 		}
-		return nil
+
+		// Show last N lines
+		tailCmd := exec.Command("tail", "-n", fmt.Sprintf("%d", lines), logPath)
+		tailCmd.Stdout = os.Stdout
+		tailCmd.Stderr = os.Stderr
+		return tailCmd.Run()
 	},
 }
 

@@ -2,7 +2,15 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"runtime"
 
+	"github.com/rad-security/clawkeeper-mcp-gateway/internal/config"
+	"github.com/rad-security/clawkeeper-mcp-gateway/internal/detection"
+	"github.com/rad-security/clawkeeper-mcp-gateway/internal/logging"
+	"github.com/rad-security/clawkeeper-mcp-gateway/internal/proxy"
+	"github.com/rad-security/clawkeeper-mcp-gateway/internal/telemetry"
+	"github.com/rad-security/clawkeeper-mcp-gateway/internal/server"
 	"github.com/spf13/cobra"
 )
 
@@ -19,12 +27,76 @@ the gateway logs all tool calls and flags suspicious activity without
 blocking. In enforce mode, tool calls that violate security policies
 are blocked.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if enforce {
-			fmt.Println("Starting gateway in enforce mode...")
-		} else {
-			fmt.Println("Starting gateway in audit mode...")
+		enforce, _ := cmd.Flags().GetBool("enforce")
+		verbose, _ := cmd.Root().PersistentFlags().GetBool("verbose")
+
+		// Load config
+		cfg, err := config.Load()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[clawkeeper] warning: config load error: %v, using defaults\n", err)
+			cfg = config.DefaultConfig()
 		}
-		return nil
+
+		if enforce {
+			cfg.Mode = "enforce"
+		}
+
+		// Create logger
+		logger, err := logging.NewLogger(cfg.LogPath, verbose)
+		if err != nil {
+			return fmt.Errorf("creating logger: %w", err)
+		}
+		defer logger.Close()
+
+		// Create detection engine
+		engine := detection.NewEngine()
+
+		// Build server configs from config
+		var serverConfigs []server.ServerConfig
+		for _, s := range cfg.Servers {
+			serverConfigs = append(serverConfigs, server.ServerConfig{
+				Name:      s.Name,
+				Command:   s.Command,
+				Args:      s.Args,
+				Env:       s.Env,
+				Transport: s.Transport,
+				URL:       s.URL,
+				Headers:   s.Headers,
+			})
+		}
+
+		// Create server manager
+		mgr := server.NewManager(serverConfigs)
+
+		// Log session start
+		hostname, _ := os.Hostname()
+		serverNames := make([]string, len(cfg.Servers))
+		for i, s := range cfg.Servers {
+			serverNames[i] = s.Name
+		}
+		logger.LogSessionStart(hostname, runtime.GOOS, version, serverNames)
+
+		// Print startup message
+		mode := "audit"
+		if cfg.Mode == "enforce" {
+			mode = "enforce"
+		}
+		fmt.Fprintf(os.Stderr, "[clawkeeper] MCP Gateway v%s starting in %s mode\n", version, mode)
+		fmt.Fprintf(os.Stderr, "[clawkeeper] %d servers configured, %d detection patterns loaded\n", len(serverConfigs), 36)
+		if cfg.APIKey != "" {
+			fmt.Fprintf(os.Stderr, "[clawkeeper] Connected to dashboard\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "[clawkeeper] Local mode (run 'clawkeeper-mcp-gateway auth login' to connect)\n")
+		}
+
+		// Create and run proxy
+		p := proxy.NewProxy(proxy.Config{
+			EnforceMode:     cfg.Mode == "enforce",
+			DetectionEngine: engine,
+			Logger:          logger,
+		}, mgr)
+
+		return p.Run()
 	},
 }
 
