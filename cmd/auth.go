@@ -1,8 +1,7 @@
 package cmd
 
 import (
-	"fmt"
-
+	"github.com/rad-security/clawkeeper-mcp-gateway/internal/auth"
 	"github.com/spf13/cobra"
 )
 
@@ -15,8 +14,7 @@ var authLoginCmd = &cobra.Command{
 	Use:   "login",
 	Short: "Authenticate with Clawkeeper Cloud",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("Opening browser for device authentication...")
-		return nil
+		return auth.Login()
 	},
 }
 
@@ -24,8 +22,7 @@ var authStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show current authentication status",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("Not authenticated.")
-		return nil
+		return auth.Status()
 	},
 }
 
@@ -33,8 +30,7 @@ var authLogoutCmd = &cobra.Command{
 	Use:   "logout",
 	Short: "Remove stored credentials",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("Logged out.")
-		return nil
+		return auth.Logout()
 	},
 }
 

@@ -1,28 +1,88 @@
-// Package telemetry handles batched upload of anonymized usage
-// metrics to Clawkeeper Cloud for authenticated users.
 package telemetry
 
-// Client uploads telemetry data to Clawkeeper Cloud.
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/rad-security/clawkeeper-mcp-gateway/internal/logging"
+)
+
+// Client handles batch event upload to the Clawkeeper API.
 type Client struct {
-	endpoint string
+	apiURL   string
 	apiKey   string
-	enabled  bool
+	hostname string
+	logger   *logging.Logger
+	done     chan struct{}
 }
 
 // NewClient creates a telemetry client.
-func NewClient(endpoint string, apiKey string) *Client {
+func NewClient(apiURL, apiKey string, logger *logging.Logger) *Client {
+	hostname, _ := os.Hostname()
 	return &Client{
-		endpoint: endpoint,
+		apiURL:   apiURL,
 		apiKey:   apiKey,
-		enabled:  apiKey != "",
+		hostname: hostname,
+		logger:   logger,
+		done:     make(chan struct{}),
 	}
 }
 
-// Send uploads a batch of events to the telemetry endpoint.
-func (c *Client) Send(events []map[string]interface{}) error {
-	if !c.enabled {
-		return nil
+// Start begins the background flush loop (every 5 seconds).
+func (c *Client) Start() {
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				c.flush()
+			case <-c.done:
+				c.flush() // Final flush
+				return
+			}
+		}
+	}()
+}
+
+// Stop signals the flush loop to stop.
+func (c *Client) Stop() {
+	close(c.done)
+}
+
+func (c *Client) flush() {
+	events := c.logger.FlushBuffer()
+	if len(events) == 0 {
+		return
 	}
-	// TODO: implement batch upload
-	return nil
+
+	payload := map[string]interface{}{
+		"events":   events,
+		"hostname": c.hostname,
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+
+	req, err := http.NewRequest("POST", c.apiURL+"/api/v1/mcp/events", bytes.NewReader(data))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	client := &http.Client{Timeout: 4 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		// Network error — events stay in local JSONL (already written by logger)
+		fmt.Fprintf(os.Stderr, "[clawkeeper] telemetry upload failed: %v\n", err)
+		return
+	}
+	resp.Body.Close()
 }

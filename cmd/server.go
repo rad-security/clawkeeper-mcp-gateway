@@ -48,6 +48,17 @@ are blocked.`,
 		}
 		defer logger.Close()
 
+		// Start telemetry if connected
+		if cfg.APIKey != "" {
+			apiURL := cfg.APIURL
+			if apiURL == "" {
+				apiURL = "https://clawkeeper.dev"
+			}
+			tc := telemetry.NewClient(apiURL, cfg.APIKey, logger)
+			tc.Start()
+			defer tc.Stop()
+		}
+
 		// Create detection engine
 		engine := detection.NewEngine()
 
