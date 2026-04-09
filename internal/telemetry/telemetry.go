@@ -6,18 +6,55 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"runtime"
+	"sync"
 	"time"
 
 	"github.com/rad-security/clawkeeper-mcp-gateway/internal/logging"
 )
 
-// Client handles batch event upload to the Clawkeeper API.
+// ServerInfo describes a connected MCP server for sync registration.
+type ServerInfo struct {
+	Name      string     `json:"name"`
+	Transport string     `json:"transport,omitempty"`
+	Tools     []ToolInfo `json:"tools,omitempty"`
+}
+
+// ToolInfo describes a tool exposed by an MCP server.
+type ToolInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// SyncPolicy holds the org policy returned by /api/v1/mcp/sync.
+type SyncPolicy struct {
+	Mode           string              `json:"mode"`
+	Detection      DetectionConfig     `json:"detection"`
+	BlockedServers []string            `json:"blocked_servers"`
+	BlockedTools   map[string][]string `json:"blocked_tools"`
+	CustomKeywords []string            `json:"custom_keywords"`
+	SecurityLevel  string              `json:"security_level"`
+}
+
+// DetectionConfig controls detection behavior from the dashboard.
+type DetectionConfig struct {
+	Threat        string `json:"threat"`         // "warn", "block", "monitor"
+	SensitiveData string `json:"sensitive_data"`  // "warn", "block", "monitor"
+}
+
+// Client handles batch event upload and gateway registration with the Clawkeeper API.
 type Client struct {
-	apiURL   string
-	apiKey   string
-	hostname string
-	logger   *logging.Logger
-	done     chan struct{}
+	apiURL         string
+	apiKey         string
+	hostname       string
+	mode           string
+	gatewayVersion string
+	servers        []ServerInfo
+	gatewayID      string
+	logger         *logging.Logger
+	done           chan struct{}
+	cachedPolicy   SyncPolicy
+	policyMu       sync.RWMutex
 }
 
 // NewClient creates a telemetry client.
@@ -27,20 +64,43 @@ func NewClient(apiURL, apiKey string, logger *logging.Logger) *Client {
 		apiURL:   apiURL,
 		apiKey:   apiKey,
 		hostname: hostname,
+		mode:     "audit",
 		logger:   logger,
 		done:     make(chan struct{}),
 	}
 }
 
-// Start begins the background flush loop (every 5 seconds).
+// SetMode sets the gateway mode for sync registration.
+func (c *Client) SetMode(mode string) {
+	c.mode = mode
+}
+
+// SetVersion sets the gateway version for sync registration.
+func (c *Client) SetVersion(version string) {
+	c.gatewayVersion = version
+}
+
+// SetServers sets the connected servers for sync registration.
+func (c *Client) SetServers(servers []ServerInfo) {
+	c.servers = servers
+}
+
+// Start registers the gateway and begins background flush/heartbeat loops.
 func (c *Client) Start() {
+	// Register immediately on startup
+	c.sync()
+
 	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
+		flushTicker := time.NewTicker(5 * time.Second)
+		syncTicker := time.NewTicker(30 * time.Second)
+		defer flushTicker.Stop()
+		defer syncTicker.Stop()
 		for {
 			select {
-			case <-ticker.C:
+			case <-flushTicker.C:
 				c.flush()
+			case <-syncTicker.C:
+				c.sync()
 			case <-c.done:
 				c.flush() // Final flush
 				return
@@ -52,6 +112,67 @@ func (c *Client) Start() {
 // Stop signals the flush loop to stop.
 func (c *Client) Stop() {
 	close(c.done)
+}
+
+// Policy returns the cached dashboard policy. Returns zero-value SyncPolicy
+// if no policy has been synced (local-only mode or first boot).
+func (c *Client) Policy() SyncPolicy {
+	c.policyMu.RLock()
+	defer c.policyMu.RUnlock()
+	return c.cachedPolicy
+}
+
+// sync registers or heartbeats the gateway via /api/v1/mcp/sync.
+func (c *Client) sync() {
+	payload := map[string]interface{}{
+		"hostname":          c.hostname,
+		"os":                runtime.GOOS,
+		"os_version":        runtime.GOARCH,
+		"gateway_version":   c.gatewayVersion,
+		"mode":              c.mode,
+		"connected_clients": []string{},
+		"connected_servers": c.servers,
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+
+	req, err := http.NewRequest("POST", c.apiURL+"/api/v1/mcp/sync", bytes.NewReader(data))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	client := &http.Client{Timeout: 4 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[clawkeeper] sync failed: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		OK        bool       `json:"ok"`
+		GatewayID string     `json:"gateway_id"`
+		Policy    SyncPolicy `json:"policy"`
+		Error     string     `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
+		if result.GatewayID != "" {
+			c.gatewayID = result.GatewayID
+		}
+		if result.OK {
+			c.policyMu.Lock()
+			c.cachedPolicy = result.Policy
+			c.policyMu.Unlock()
+		}
+	}
+	if resp.StatusCode != 200 {
+		fmt.Fprintf(os.Stderr, "[clawkeeper] sync error (HTTP %d): %s\n", resp.StatusCode, result.Error)
+	}
 }
 
 func (c *Client) flush() {
@@ -80,7 +201,6 @@ func (c *Client) flush() {
 	client := &http.Client{Timeout: 4 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		// Network error — events stay in local JSONL (already written by logger)
 		fmt.Fprintf(os.Stderr, "[clawkeeper] telemetry upload failed: %v\n", err)
 		return
 	}
