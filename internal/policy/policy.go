@@ -31,7 +31,10 @@ func Evaluate(p telemetry.SyncPolicy, serverName, toolName string, args map[stri
 	}
 
 	// 2. Blocked tool?
-	if tools, ok := p.BlockedTools[serverName]; ok {
+	for srvKey, tools := range p.BlockedTools {
+		if !strings.EqualFold(srvKey, serverName) {
+			continue
+		}
 		for _, t := range tools {
 			if strings.EqualFold(t, toolName) {
 				return Result{

@@ -46,6 +46,21 @@ func TestBlockedToolAllowsOtherTools(t *testing.T) {
 	}
 }
 
+func TestBlockedToolCaseInsensitiveServerName(t *testing.T) {
+	p := telemetry.SyncPolicy{
+		BlockedTools: map[string][]string{
+			"GitHub": {"delete_repo"},
+		},
+	}
+	r := Evaluate(p, "github", "delete_repo", map[string]interface{}{})
+	if r.Verdict != "block" {
+		t.Errorf("expected block for case-insensitive server name in BlockedTools, got %s", r.Verdict)
+	}
+	if r.Rule != "blocked_tool" {
+		t.Errorf("expected rule blocked_tool, got %s", r.Rule)
+	}
+}
+
 func TestCustomKeywordMatch(t *testing.T) {
 	p := telemetry.SyncPolicy{
 		CustomKeywords: []string{"ACME-INTERNAL", "PROJECT-FALCON"},

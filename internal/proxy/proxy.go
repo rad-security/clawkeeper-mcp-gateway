@@ -303,20 +303,23 @@ func (p *Proxy) handleToolsCall(msg JSONRPCMessage) (*JSONRPCMessage, error) {
 	originalName := strings.TrimPrefix(callParams.Name, serverName+"__")
 
 	// --- 1. Policy check ---
+	var finalVerdict string = "pass"
+	var finalResult detection.Result
+
 	if p.telemetry != nil {
 		syncPolicy := p.telemetry.Policy()
 		policyResult := policy.Evaluate(syncPolicy, serverName, originalName, callParams.Arguments)
 
 		if policyResult.Verdict == "block" {
-			p.config.Logger.LogToolCall(serverName, originalName, callParams.Arguments, detection.Result{
-				Verdict:     detection.VerdictBlock,
-				PatternName: policyResult.Rule,
-				Severity:    "high",
-				Description: policyResult.Reason,
-				Category:    "policy",
-			})
-
 			if p.config.EnforceMode {
+				// Enforce: block immediately, log, and return error
+				p.config.Logger.LogToolCall(serverName, originalName, callParams.Arguments, detection.Result{
+					Verdict:     detection.VerdictBlock,
+					PatternName: policyResult.Rule,
+					Severity:    "high",
+					Description: policyResult.Reason,
+					Category:    "policy",
+				})
 				errResult := map[string]interface{}{
 					"content": []map[string]interface{}{
 						{
@@ -329,26 +332,35 @@ func (p *Proxy) handleToolsCall(msg JSONRPCMessage) (*JSONRPCMessage, error) {
 				resultJSON, _ := json.Marshal(errResult)
 				return &JSONRPCMessage{JSONRPC: "2.0", ID: msg.ID, Result: resultJSON}, nil
 			}
-			// Audit mode: log but continue
+			// Audit mode: seed the merged verdict so it propagates
+			finalVerdict = "block"
+			finalResult = detection.Result{
+				Verdict:     detection.VerdictBlock,
+				PatternName: policyResult.Rule,
+				Severity:    "high",
+				Description: policyResult.Reason,
+				Category:    "policy",
+			}
 		} else if policyResult.Verdict == "warn" {
-			p.config.Logger.LogToolCall(serverName, originalName, callParams.Arguments, detection.Result{
+			finalVerdict = "warn"
+			finalResult = detection.Result{
 				Verdict:     detection.VerdictWarn,
 				PatternName: policyResult.Rule,
 				Severity:    "medium",
 				Description: policyResult.Reason,
 				Category:    "policy",
-			})
+			}
 		}
 	}
 
 	// --- 2. Embedded detection ---
-	var finalVerdict string = "pass"
-	var finalResult detection.Result
 
 	if p.config.DetectionEngine != nil {
 		embeddedResult := p.config.DetectionEngine.EvaluateToolCall(serverName, originalName, callParams.Arguments)
-		finalVerdict = string(embeddedResult.Verdict)
-		finalResult = embeddedResult
+		if verdictRank(string(embeddedResult.Verdict)) > verdictRank(finalVerdict) {
+			finalVerdict = string(embeddedResult.Verdict)
+			finalResult = embeddedResult
+		}
 	}
 
 	// --- 3. Connected detection (API, 4s timeout) ---
