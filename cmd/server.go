@@ -49,12 +49,25 @@ are blocked.`,
 		defer logger.Close()
 
 		// Start telemetry if connected
+		var tc *telemetry.Client
 		if cfg.APIKey != "" {
 			apiURL := cfg.APIURL
 			if apiURL == "" {
 				apiURL = "https://clawkeeper.dev"
 			}
-			tc := telemetry.NewClient(apiURL, cfg.APIKey, logger)
+			tc = telemetry.NewClient(apiURL, cfg.APIKey, logger)
+			tc.SetMode(cfg.Mode)
+			tc.SetVersion(version)
+
+			// Build server info for registration
+			var serverInfos []telemetry.ServerInfo
+			for _, s := range cfg.Servers {
+				serverInfos = append(serverInfos, telemetry.ServerInfo{
+					Name:      s.Name,
+					Transport: s.Transport,
+				})
+			}
+			tc.SetServers(serverInfos)
 			tc.Start()
 			defer tc.Stop()
 		}
@@ -105,7 +118,7 @@ are blocked.`,
 			EnforceMode:     cfg.Mode == "enforce",
 			DetectionEngine: engine,
 			Logger:          logger,
-		}, mgr)
+		}, mgr, tc)
 
 		return p.Run()
 	},

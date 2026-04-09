@@ -14,7 +14,9 @@ import (
 
 	"github.com/rad-security/clawkeeper-mcp-gateway/internal/detection"
 	"github.com/rad-security/clawkeeper-mcp-gateway/internal/logging"
+	"github.com/rad-security/clawkeeper-mcp-gateway/internal/policy"
 	"github.com/rad-security/clawkeeper-mcp-gateway/internal/server"
+	"github.com/rad-security/clawkeeper-mcp-gateway/internal/telemetry"
 )
 
 // JSONRPCMessage represents a JSON-RPC 2.0 message.
@@ -43,19 +45,33 @@ type Config struct {
 
 // Proxy manages the MCP protocol proxy.
 type Proxy struct {
-	config  Config
-	manager *server.Manager
-	mu      sync.Mutex
+	config    Config
+	manager   *server.Manager
+	telemetry *telemetry.Client
+	mu        sync.Mutex
 	// Map from namespaced tool name to server name
 	toolMap map[string]string
 }
 
 // NewProxy creates a new MCP proxy.
-func NewProxy(cfg Config, mgr *server.Manager) *Proxy {
+func NewProxy(cfg Config, mgr *server.Manager, tc *telemetry.Client) *Proxy {
 	return &Proxy{
-		config:  cfg,
-		manager: mgr,
-		toolMap: make(map[string]string),
+		config:    cfg,
+		manager:   mgr,
+		telemetry: tc,
+		toolMap:   make(map[string]string),
+	}
+}
+
+// verdictRank maps verdict strings to numeric severity for comparison.
+func verdictRank(v string) int {
+	switch v {
+	case "block":
+		return 3
+	case "warn":
+		return 2
+	default: // "pass", "allow", ""
+		return 1
 	}
 }
 
@@ -286,40 +302,94 @@ func (p *Proxy) handleToolsCall(msg JSONRPCMessage) (*JSONRPCMessage, error) {
 	// Strip the namespace prefix to get the original tool name
 	originalName := strings.TrimPrefix(callParams.Name, serverName+"__")
 
-	// --- Pre-execution detection ---
-	if p.config.DetectionEngine != nil {
-		result := p.config.DetectionEngine.EvaluateToolCall(serverName, originalName, callParams.Arguments)
+	// --- 1. Policy check ---
+	if p.telemetry != nil {
+		syncPolicy := p.telemetry.Policy()
+		policyResult := policy.Evaluate(syncPolicy, serverName, originalName, callParams.Arguments)
 
-		// Log the detection
-		p.config.Logger.LogToolCall(serverName, originalName, callParams.Arguments, result)
+		if policyResult.Verdict == "block" {
+			p.config.Logger.LogToolCall(serverName, originalName, callParams.Arguments, detection.Result{
+				Verdict:     detection.VerdictBlock,
+				PatternName: policyResult.Rule,
+				Severity:    "high",
+				Description: policyResult.Reason,
+				Category:    "policy",
+			})
 
-		if result.Verdict == detection.VerdictBlock && p.config.EnforceMode {
-			// Block the call — return error to client with remediation
-			errResult := map[string]interface{}{
-				"content": []map[string]interface{}{
-					{
-						"type": "text",
-						"text": fmt.Sprintf("Blocked by Clawkeeper: %s — %s. Try an alternative approach.", result.PatternName, result.Description),
+			if p.config.EnforceMode {
+				errResult := map[string]interface{}{
+					"content": []map[string]interface{}{
+						{
+							"type": "text",
+							"text": fmt.Sprintf("Blocked by Clawkeeper: %s. Try an alternative approach.", policyResult.Reason),
+						},
 					},
-				},
-				"isError": true,
+					"isError": true,
+				}
+				resultJSON, _ := json.Marshal(errResult)
+				return &JSONRPCMessage{JSONRPC: "2.0", ID: msg.ID, Result: resultJSON}, nil
 			}
-			resultJSON, _ := json.Marshal(errResult)
-			return &JSONRPCMessage{
-				JSONRPC: "2.0",
-				ID:      msg.ID,
-				Result:  resultJSON,
-			}, nil
+			// Audit mode: log but continue
+		} else if policyResult.Verdict == "warn" {
+			p.config.Logger.LogToolCall(serverName, originalName, callParams.Arguments, detection.Result{
+				Verdict:     detection.VerdictWarn,
+				PatternName: policyResult.Rule,
+				Severity:    "medium",
+				Description: policyResult.Reason,
+				Category:    "policy",
+			})
 		}
 	}
 
-	// Forward to backend server
+	// --- 2. Embedded detection ---
+	var finalVerdict string = "pass"
+	var finalResult detection.Result
+
+	if p.config.DetectionEngine != nil {
+		embeddedResult := p.config.DetectionEngine.EvaluateToolCall(serverName, originalName, callParams.Arguments)
+		finalVerdict = string(embeddedResult.Verdict)
+		finalResult = embeddedResult
+	}
+
+	// --- 3. Connected detection (API, 4s timeout) ---
+	if p.telemetry != nil {
+		apiResult := p.telemetry.Evaluate(serverName, originalName, callParams.Arguments)
+		if apiResult != nil && verdictRank(apiResult.Verdict) > verdictRank(finalVerdict) {
+			finalVerdict = apiResult.Verdict
+			finalResult = detection.Result{
+				Verdict:     detection.Verdict(apiResult.Verdict),
+				PatternName: apiResult.PatternName,
+				Severity:    apiResult.Severity,
+				Description: apiResult.Description,
+				Category:    "api_detection",
+			}
+		}
+	}
+
+	// --- 4. Log merged result ---
+	p.config.Logger.LogToolCall(serverName, originalName, callParams.Arguments, finalResult)
+
+	// --- 5. Enforce merged verdict ---
+	if finalVerdict == "block" && p.config.EnforceMode {
+		errResult := map[string]interface{}{
+			"content": []map[string]interface{}{
+				{
+					"type": "text",
+					"text": fmt.Sprintf("Blocked by Clawkeeper: %s — %s. Try an alternative approach.", finalResult.PatternName, finalResult.Description),
+				},
+			},
+			"isError": true,
+		}
+		resultJSON, _ := json.Marshal(errResult)
+		return &JSONRPCMessage{JSONRPC: "2.0", ID: msg.ID, Result: resultJSON}, nil
+	}
+
+	// --- 6. Forward to backend server ---
 	srv := p.manager.Get(serverName)
 	if srv == nil {
 		return nil, fmt.Errorf("server not available: %s", serverName)
 	}
 
-	// Build the forwarded request with original tool name
 	forwardParams := map[string]interface{}{
 		"name":      originalName,
 		"arguments": callParams.Arguments,
@@ -331,7 +401,7 @@ func (p *Proxy) handleToolsCall(msg JSONRPCMessage) (*JSONRPCMessage, error) {
 		return nil, fmt.Errorf("calling %s/%s: %w", serverName, originalName, err)
 	}
 
-	// --- Post-execution detection on response ---
+	// --- 7. Post-execution response scan ---
 	if p.config.DetectionEngine != nil {
 		respStr := string(response)
 		result := p.config.DetectionEngine.EvaluateToolResponse(serverName, originalName, respStr)
@@ -340,11 +410,7 @@ func (p *Proxy) handleToolsCall(msg JSONRPCMessage) (*JSONRPCMessage, error) {
 		}
 	}
 
-	return &JSONRPCMessage{
-		JSONRPC: "2.0",
-		ID:      msg.ID,
-		Result:  response,
-	}, nil
+	return &JSONRPCMessage{JSONRPC: "2.0", ID: msg.ID, Result: response}, nil
 }
 
 func (p *Proxy) handleResourcesList(msg JSONRPCMessage) (*JSONRPCMessage, error) {
