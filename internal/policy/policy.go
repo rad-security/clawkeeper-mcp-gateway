@@ -1,35 +1,68 @@
-// Package policy implements the policy engine that evaluates MCP
-// tool calls against user-defined rules to determine allow/deny
-// decisions.
+// Package policy evaluates MCP tool calls against dashboard-managed
+// access policies: blocked servers, blocked tools, and custom keywords.
 package policy
 
-// Rule defines a single policy rule.
-type Rule struct {
-	Name       string   `json:"name"`
-	Action     string   `json:"action"` // "allow", "deny", "warn"
-	Tools      []string `json:"tools"`  // tool name patterns
-	Conditions []string `json:"conditions,omitempty"`
+import (
+	"encoding/json"
+	"strings"
+
+	"github.com/rad-security/clawkeeper-mcp-gateway/internal/telemetry"
+)
+
+// Result holds the outcome of a policy evaluation.
+type Result struct {
+	Verdict string // "allow", "warn", "block"
+	Reason  string // human-readable explanation
+	Rule    string // "blocked_server", "blocked_tool", "custom_keyword", ""
 }
 
-// Policy is a collection of rules evaluated in order.
-type Policy struct {
-	Rules []Rule
-}
+// Evaluate checks a tool call against the synced dashboard policy.
+// Evaluation order: blocked server → blocked tool → custom keywords → allow.
+func Evaluate(p telemetry.SyncPolicy, serverName, toolName string, args map[string]interface{}) Result {
+	// 1. Blocked server?
+	for _, s := range p.BlockedServers {
+		if strings.EqualFold(s, serverName) {
+			return Result{
+				Verdict: "block",
+				Reason:  "Server '" + serverName + "' is blocked by organization policy",
+				Rule:    "blocked_server",
+			}
+		}
+	}
 
-// NewPolicy creates an empty policy.
-func NewPolicy() *Policy {
-	return &Policy{}
-}
+	// 2. Blocked tool?
+	if tools, ok := p.BlockedTools[serverName]; ok {
+		for _, t := range tools {
+			if strings.EqualFold(t, toolName) {
+				return Result{
+					Verdict: "block",
+					Reason:  "Tool '" + serverName + "/" + toolName + "' is blocked by organization policy",
+					Rule:    "blocked_tool",
+				}
+			}
+		}
+	}
 
-// Evaluate checks a tool call against all policy rules and returns
-// the action to take.
-func (p *Policy) Evaluate(toolName string, params map[string]interface{}) string {
-	// TODO: implement policy evaluation
-	return "allow"
-}
+	// 3. Custom keywords in args?
+	if len(p.CustomKeywords) > 0 && args != nil {
+		argsJSON, err := json.Marshal(args)
+		if err == nil {
+			argsLower := strings.ToLower(string(argsJSON))
+			for _, kw := range p.CustomKeywords {
+				if strings.Contains(argsLower, strings.ToLower(kw)) {
+					verdict := p.Detection.SensitiveData
+					if verdict != "block" {
+						verdict = "warn"
+					}
+					return Result{
+						Verdict: verdict,
+						Reason:  "Custom keyword '" + kw + "' detected in tool arguments",
+						Rule:    "custom_keyword",
+					}
+				}
+			}
+		}
+	}
 
-// LoadFromFile reads policy rules from a YAML or JSON file.
-func LoadFromFile(path string) (*Policy, error) {
-	// TODO: implement policy loading
-	return NewPolicy(), nil
+	return Result{Verdict: "allow"}
 }
