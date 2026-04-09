@@ -93,7 +93,7 @@ are blocked.`,
 		mgr := server.NewManager(serverConfigs)
 
 		// Log session start
-		hostname, _ := os.Hostname()
+		hostname := telemetry.StableHostname()
 		serverNames := make([]string, len(cfg.Servers))
 		for i, s := range cfg.Servers {
 			serverNames[i] = s.Name

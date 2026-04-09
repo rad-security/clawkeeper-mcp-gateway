@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,9 +67,25 @@ type Client struct {
 	policyMu       sync.RWMutex
 }
 
+// StableHostname returns a stable machine hostname. On macOS, os.Hostname()
+// returns the network-assigned name which changes per Wi-Fi network. We use
+// scutil --get LocalHostName instead, falling back to os.Hostname().
+func StableHostname() string {
+	if runtime.GOOS == "darwin" {
+		out, err := exec.Command("scutil", "--get", "LocalHostName").Output()
+		if err == nil {
+			if h := strings.TrimSpace(string(out)); h != "" {
+				return h
+			}
+		}
+	}
+	h, _ := os.Hostname()
+	return h
+}
+
 // NewClient creates a telemetry client.
 func NewClient(apiURL, apiKey string, logger *logging.Logger) *Client {
-	hostname, _ := os.Hostname()
+	hostname := StableHostname()
 	return &Client{
 		apiURL:   apiURL,
 		apiKey:   apiKey,
