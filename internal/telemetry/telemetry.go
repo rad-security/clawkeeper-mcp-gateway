@@ -42,6 +42,14 @@ type DetectionConfig struct {
 	SensitiveData string `json:"sensitive_data"`  // "warn", "block", "monitor"
 }
 
+// EvaluateResult holds the server-side detection verdict from /api/v1/mcp/evaluate.
+type EvaluateResult struct {
+	Verdict     string `json:"verdict"`      // "pass", "warn", "block"
+	PatternName string `json:"pattern_name"`
+	Severity    string `json:"severity"`
+	Description string `json:"description"`
+}
+
 // Client handles batch event upload and gateway registration with the Clawkeeper API.
 type Client struct {
 	apiURL         string
@@ -120,6 +128,48 @@ func (c *Client) Policy() SyncPolicy {
 	c.policyMu.RLock()
 	defer c.policyMu.RUnlock()
 	return c.cachedPolicy
+}
+
+// Evaluate sends a tool call to the server-side detection engine.
+// Returns nil on timeout, network error, or non-200 response (caller
+// should fall back to embedded detection).
+func (c *Client) Evaluate(serverName, toolName string, params map[string]interface{}) *EvaluateResult {
+	payload := map[string]interface{}{
+		"server_name": serverName,
+		"tool_name":   toolName,
+		"params":      params,
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil
+	}
+
+	req, err := http.NewRequest("POST", c.apiURL+"/api/v1/mcp/evaluate", bytes.NewReader(data))
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	client := &http.Client{Timeout: 4 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		c.logger.Warn("connected detection failed: %v", err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil
+	}
+
+	var result EvaluateResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil
+	}
+
+	return &result
 }
 
 // sync registers or heartbeats the gateway via /api/v1/mcp/sync.
