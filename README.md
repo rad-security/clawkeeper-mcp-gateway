@@ -103,6 +103,60 @@ clawkeeper-mcp-gateway auth login|status|logout
 clawkeeper-mcp-gateway completion zsh|bash|fish
 ```
 
+## Headless / Config-Managed Install
+
+The gateway is designed to work under a fleet config-management tool (Kanji, Ansible, Jamf, MDM) that does not know any individual developer's home directory. Drop a config at `/etc/clawkeeper-mcp-gateway/config.json`, or set env vars, and the gateway picks it up.
+
+**Config path resolution (in priority order):**
+
+| # | Source | Example |
+|---|---|---|
+| 1 | `--config` flag | `clawkeeper-mcp-gateway --config /opt/ck/cfg.json server` |
+| 2 | `$CLAWKEEPER_CONFIG` env var | `export CLAWKEEPER_CONFIG=/opt/ck/cfg.json` |
+| 3 | `$XDG_CONFIG_HOME/clawkeeper-mcp-gateway/config.json` (if file exists) | per-user override |
+| 4 | `~/.config/clawkeeper-mcp-gateway/config.json` (if file exists) | dev default |
+| 5 | `/etc/clawkeeper-mcp-gateway/config.json` (if file exists) | system-wide, fleet-deploy target |
+| fallback | `~/.config/clawkeeper-mcp-gateway/config.json` | created on first write |
+
+**Environment overrides:**
+
+| Field | Env var | Rule |
+|---|---|---|
+| `api_key` | `CLAWKEEPER_API_KEY` | File wins when set; env fills blanks only. |
+| `api_url` | `CLAWKEEPER_API_URL` | File wins when set to a non-default value; env fills blanks and the factory default. |
+
+The file-wins-over-env rule is deliberate — rotate the API key by re-rendering the config file, not by setting a shell env var that silently shadows the real config.
+
+**Checking the resolved state:**
+
+```bash
+$ clawkeeper-mcp-gateway config show
+# config path: /etc/clawkeeper-mcp-gateway/config.json
+# api_key:     file
+# api_url:     default
+{ "mode": "audit", ... }
+```
+
+`config show` prints the resolved path and labels every overridable field as `file`, `env`, or `default`.
+
+**Sample systemd unit (Linux):**
+
+```ini
+# /etc/systemd/system/clawkeeper-mcp-gateway.service
+[Unit]
+Description=Clawkeeper MCP Gateway
+After=network-online.target
+
+[Service]
+User=clawkeeper
+ExecStart=/usr/local/bin/clawkeeper-mcp-gateway server
+Environment=CLAWKEEPER_CONFIG=/etc/clawkeeper-mcp-gateway/config.json
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
 ## Architecture
 
 ```

@@ -61,12 +61,55 @@ type DashboardPolicy struct {
 	Detection      DetectionConfig     `json:"detection"`
 }
 
+// Environment variable names the config layer reads.
+const (
+	envConfigPath = "CLAWKEEPER_CONFIG"
+	envAPIKey     = "CLAWKEEPER_API_KEY"
+	envAPIURL     = "CLAWKEEPER_API_URL"
+)
+
+// SystemConfigPath is the well-known fleet-deploy location. Configuration-
+// management tools (Kanji, Ansible, Jamf, MDM) drop the gateway config here
+// because they do not know any individual developer's home directory.
+const SystemConfigPath = "/etc/clawkeeper-mcp-gateway/config.json"
+
+// defaultAPIURL is treated as "blank" for env-override purposes — a config
+// file that leaves APIURL at the factory default does not block the env var.
+const defaultAPIURL = "https://clawkeeper.dev"
+
+// Source labels where a resolved field came from. Used by LoadWithSource to
+// power `config show` output. (ARB condition C4.)
+type Source string
+
+const (
+	SourceFile    Source = "file"
+	SourceEnv     Source = "env"
+	SourceDefault Source = "default"
+)
+
+// LoadResult is the output of LoadWithSource: config plus per-field provenance.
+type LoadResult struct {
+	Config       Config
+	Path         string // resolved config file path (may not exist)
+	APIKeySource Source
+	APIURLSource Source
+}
+
+// pathOverride is set by the root cobra command from --config.
+// It is an in-process global to avoid threading an argument through every
+// config function (Load/Save/AddServer/RemoveServer/SaveAPIKey) and every
+// cobra handler. Tests call ResolveConfigPath directly and do not touch it.
+var pathOverride string
+
+// SetPathOverride wires the --config flag into the resolver.
+func SetPathOverride(p string) { pathOverride = p }
+
 // DefaultConfig returns the default configuration.
 func DefaultConfig() Config {
 	return Config{
 		Mode:    "audit",
 		Verbose: false,
-		APIURL:  "https://clawkeeper.dev",
+		APIURL:  defaultAPIURL,
 		Detection: DetectionConfig{
 			Threat:        "warn",
 			SensitiveData: "warn",
@@ -74,52 +117,130 @@ func DefaultConfig() Config {
 	}
 }
 
-// Load reads configuration from the local config file.
-// Returns default config if no file exists.
-func Load() (Config, error) {
-	cfg := DefaultConfig()
-
-	// Try local config file
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return cfg, nil
+// ResolveConfigPath picks the config file path from (in order):
+//  1. flag (--config)
+//  2. $CLAWKEEPER_CONFIG
+//  3. $XDG_CONFIG_HOME/clawkeeper-mcp-gateway/config.json  (if file exists)
+//  4. ~/.config/clawkeeper-mcp-gateway/config.json          (if file exists)
+//  5. systemFallback (typically SystemConfigPath)           (if file exists)
+//  6. fallback to ~/.config/... (used for writes when nothing exists yet)
+func ResolveConfigPath(flag, systemFallback string) string {
+	if flag != "" {
+		return flag
+	}
+	if p := os.Getenv(envConfigPath); p != "" {
+		return p
 	}
 
-	configPath := filepath.Join(home, ".config", "clawkeeper-mcp-gateway", "config.json")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return cfg, nil // No config file — use defaults
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		p := filepath.Join(xdg, "clawkeeper-mcp-gateway", "config.json")
+		if fileExists(p) {
+			return p
 		}
-		return cfg, fmt.Errorf("reading config: %w", err)
 	}
 
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("parsing config: %w", err)
+	homeCfg := ""
+	if home, err := os.UserHomeDir(); err == nil {
+		homeCfg = filepath.Join(home, ".config", "clawkeeper-mcp-gateway", "config.json")
+		if fileExists(homeCfg) {
+			return homeCfg
+		}
 	}
 
-	return cfg, nil
+	if systemFallback != "" && fileExists(systemFallback) {
+		return systemFallback
+	}
+
+	// Nothing exists yet — return a default path usable for Save.
+	if homeCfg != "" {
+		return homeCfg
+	}
+	return systemFallback
 }
 
-// Save writes the configuration to the local config file.
+// fileExists reports whether path names a regular file readable by this process.
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+// LoadWithPath reads configuration from path and applies env-var overrides.
+// A missing file is not an error — defaults plus env overrides are returned.
+func LoadWithPath(path string) (Config, error) {
+	res, err := LoadWithSource(path)
+	return res.Config, err
+}
+
+// LoadWithSource is LoadWithPath plus per-field provenance for `config show`.
+func LoadWithSource(path string) (LoadResult, error) {
+	cfg := DefaultConfig()
+	res := LoadResult{
+		Path:         path,
+		APIKeySource: SourceDefault,
+		APIURLSource: SourceDefault,
+	}
+
+	if path != "" {
+		data, err := os.ReadFile(path)
+		switch {
+		case err == nil:
+			if err := json.Unmarshal(data, &cfg); err != nil {
+				return res, fmt.Errorf("parsing config: %w", err)
+			}
+			if cfg.APIKey != "" {
+				res.APIKeySource = SourceFile
+			}
+			if cfg.APIURL != "" && cfg.APIURL != defaultAPIURL {
+				res.APIURLSource = SourceFile
+			}
+		case os.IsNotExist(err):
+			// Fall through — defaults + env overrides still apply.
+		default:
+			return res, fmt.Errorf("reading config: %w", err)
+		}
+	}
+
+	// Env overrides: file wins when set; env fills blanks or the factory URL.
+	if cfg.APIKey == "" {
+		if v := os.Getenv(envAPIKey); v != "" {
+			cfg.APIKey = v
+			res.APIKeySource = SourceEnv
+		}
+	}
+	if cfg.APIURL == "" || cfg.APIURL == defaultAPIURL {
+		if v := os.Getenv(envAPIURL); v != "" {
+			cfg.APIURL = v
+			res.APIURLSource = SourceEnv
+		} else if cfg.APIURL == "" {
+			cfg.APIURL = defaultAPIURL
+		}
+	}
+
+	res.Config = cfg
+	return res, nil
+}
+
+// Load reads configuration using the resolved path (--config / env / XDG /
+// home / /etc / default fallback). Preserves the legacy signature so existing
+// callers (cmd/*, internal/auth) need no changes.
+func Load() (Config, error) {
+	return LoadWithPath(ResolveConfigPath(pathOverride, SystemConfigPath))
+}
+
+// Save writes cfg to the resolved config path, creating the parent directory
+// if needed. In a fleet deploy where the resolved path is /etc/..., a non-root
+// developer will get EACCES — that is intentional. The fix is to re-render
+// via the config-management tool, not to silently write to a different path.
 func Save(cfg Config) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	path := ResolveConfigPath(pathOverride, SystemConfigPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-
-	configDir := filepath.Join(home, ".config", "clawkeeper-mcp-gateway")
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return err
-	}
-
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-
-	configPath := filepath.Join(configDir, "config.json")
-	return os.WriteFile(configPath, data, 0644)
+	return os.WriteFile(path, data, 0o644)
 }
 
 // SaveAPIKey stores the API key from auth login.

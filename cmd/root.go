@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/rad-security/clawkeeper-mcp-gateway/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -25,6 +26,9 @@ Modes:
 
 The gateway supports stdio-based MCP servers and provides real-time
 threat detection, sensitive data scanning, and policy enforcement.`,
+	PersistentPreRun: func(_ *cobra.Command, _ []string) {
+		config.SetPathOverride(configPath)
+	},
 }
 
 // Execute runs the root command.

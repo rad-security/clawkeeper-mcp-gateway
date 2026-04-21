@@ -15,14 +15,19 @@ var configCmd = &cobra.Command{
 
 var configShowCmd = &cobra.Command{
 	Use:   "show",
-	Short: "Display current configuration",
+	Short: "Display current configuration and where each field came from",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		res, err := config.LoadWithSource(
+			config.ResolveConfigPath(configPath, config.SystemConfigPath),
+		)
 		if err != nil {
 			return err
 		}
-		data, _ := json.MarshalIndent(cfg, "", "  ")
-		fmt.Println(string(data))
+		fmt.Fprintf(cmd.OutOrStdout(), "# config path: %s\n", res.Path)
+		fmt.Fprintf(cmd.OutOrStdout(), "# api_key:     %s\n", res.APIKeySource)
+		fmt.Fprintf(cmd.OutOrStdout(), "# api_url:     %s\n", res.APIURLSource)
+		data, _ := json.MarshalIndent(res.Config, "", "  ")
+		fmt.Fprintln(cmd.OutOrStdout(), string(data))
 		return nil
 	},
 }
