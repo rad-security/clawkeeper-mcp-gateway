@@ -24,6 +24,14 @@ import (
 var binary string
 
 func TestMain(m *testing.M) {
+	// CK_E2E_BINARY lets CI / release-verification point the suite at a
+	// pre-built binary (e.g. one pulled from a GitHub release tarball) instead
+	// of compiling from the current source tree. When unset, build from source.
+	if preBuilt := os.Getenv("CK_E2E_BINARY"); preBuilt != "" {
+		binary = preBuilt
+		os.Exit(m.Run())
+	}
+
 	tmp, err := os.MkdirTemp("", "ckmcp-e2e-")
 	if err != nil {
 		panic(err)
