@@ -25,9 +25,21 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
-brews:
-  - repository:
-      owner: rad-security
-      name: homebrew-tap
-    homepage: "https://clawkeeper.dev/mcp-gateway"
-    description: "Open-source MCP gateway with threat detection and policy enforcement"
+signs:
+  - cmd: cosign
+    args:
+      - sign-blob
+      - "--output-signature=${signature}"
+      - "--yes"
+      - "${artifact}"
+    artifacts: checksum
+    signature: "${artifact}.sig"
+
+# Homebrew tap is out of scope for v0.1.0 — tap repo does not exist.
+# Re-enable once rad-security/homebrew-tap is created (see parent plan §4 Non-Goals).
+# brews:
+#   - repository:
+#       owner: rad-security
+#       name: homebrew-tap
+#     homepage: "https://clawkeeper.dev/mcp-gateway"
+#     description: "Open-source MCP gateway with threat detection and policy enforcement"
