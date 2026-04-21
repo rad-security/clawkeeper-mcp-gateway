@@ -101,7 +101,28 @@ clawkeeper-mcp-gateway export --format json|csv --since 2026-04-01
 clawkeeper-mcp-gateway config show
 clawkeeper-mcp-gateway auth login|status|logout
 clawkeeper-mcp-gateway completion zsh|bash|fish
+
+# IDE integration (zero-touch)
+clawkeeper-mcp-gateway configure-ide [--dry-run] [--ide=claude-code|claude-desktop|cursor]
 ```
+
+## Zero-touch IDE wiring
+
+`configure-ide` rewrites every installed IDE's MCP config to route through the gateway. One command, all IDEs, fully idempotent.
+
+```bash
+clawkeeper-mcp-gateway configure-ide --dry-run   # preview; writes nothing
+clawkeeper-mcp-gateway configure-ide              # apply
+```
+
+Supports **Claude Code** (`~/.claude/settings.json`), **Claude Desktop** (macOS + Linux), and **Cursor** (`~/.cursor/mcp.json`). For each detected IDE it:
+
+1. Backs up the existing config to `*.clawkeeper-backup-<unix-nanos>`
+2. Migrates any already-registered MCP servers into the gateway's own config (environment variables and all)
+3. Rewrites the IDE's `mcpServers` map to a single entry pointing at the gateway
+4. Preserves every non-MCP top-level key verbatim (`permissions`, `preferences`, etc.)
+
+A second invocation is a no-op — the command detects a correctly-wired config and skips the write entirely. Safe to run from a login hook, a postinstall script, or on every Kanji reapply.
 
 ## Headless / Config-Managed Install
 
