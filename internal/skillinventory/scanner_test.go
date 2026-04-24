@@ -415,23 +415,100 @@ func TestScan_CoworkPersistentSkills(t *testing.T) {
 	}
 }
 
-func TestScan_CoworkEphemeralSessionSkillsSkipped(t *testing.T) {
+func TestScan_CoworkEphemeralSessionSkills_Reported(t *testing.T) {
+	// Behaviour changed in v0.5.2: ephemeral per-session skills ARE now
+	// reported, tagged source="cowork-session". Reporting trumps phantom-row
+	// concerns because customers rely on the in-app skill-creator path and
+	// expect to see their skills in the inventory while active.
 	home := t.TempDir()
 	appSupport := coworkAppSupportDir(home)
 	if appSupport == "" {
 		t.Skip("no cowork app-support dir on this OS")
 	}
 
-	// Ephemeral per-session skill under local_<uuid> — MUST NOT be scanned
-	// (anthropics/claude-code#31422).
-	ephemeralDir := filepath.Join(appSupport, "local-agent-mode-sessions", "sess-123", "local_abcdef", ".claude", "skills")
-	seedSkill(t, ephemeralDir, "user-scratch", "# User Scratch")
+	// Real-world layout observed on macOS April 2026:
+	//   local-agent-mode-sessions/<sessA>/<sessB>/local_<uuid>/.claude/skills/<name>/SKILL.md
+	ephemeralDir := filepath.Join(appSupport, "local-agent-mode-sessions",
+		"5098f65a-session-a", "2fe536e7-session-b", "local_abc-uuid", ".claude", "skills")
+	seedSkill(t, ephemeralDir, "user-scratch", "# User Scratch\nephemeral session skill")
+
+	inv, _ := Scan(ScanOptions{Home: home})
+
+	var found *Skill
+	for i, s := range inv.Skills {
+		if s.Name == "user-scratch" {
+			found = &inv.Skills[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected ephemeral session skill to be reported; got skills=%+v", inv.Skills)
+	}
+	if found.Source != "cowork-session" {
+		t.Errorf("expected source=cowork-session, got %q", found.Source)
+	}
+	if found.Platform != PlatformClaudeDesktop {
+		t.Errorf("expected platform=claude_desktop, got %q", found.Platform)
+	}
+	if found.Hash == "" || found.Preview == "" {
+		t.Errorf("cowork-session skill missing hash/preview")
+	}
+}
+
+func TestScan_CoworkSessionUploadsAreNotSkills(t *testing.T) {
+	// Cowork drops user-uploaded files (images, docs, PDFs) into
+	// `local_<uuid>/uploads/`. Sometimes those files are literally named
+	// SKILL.md but they are NOT skill manifests — just user content. The
+	// scanner must require the `.claude/skills/<name>/SKILL.md` tail and
+	// not pick up `uploads/SKILL.md`.
+	home := t.TempDir()
+	appSupport := coworkAppSupportDir(home)
+	if appSupport == "" {
+		t.Skip("no cowork app-support dir on this OS")
+	}
+
+	uploadDir := filepath.Join(appSupport, "local-agent-mode-sessions",
+		"sess-a", "sess-b", "local_xyz", "uploads")
+	if err := os.MkdirAll(uploadDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(uploadDir, "SKILL.md"), []byte("# not a skill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	inv, _ := Scan(ScanOptions{Home: home})
 	for _, s := range inv.Skills {
-		if s.Name == "user-scratch" {
-			t.Errorf("ephemeral session skill must not be surfaced; got %+v", s)
-		}
+		t.Errorf("uploads/SKILL.md must not be treated as a skill; got %+v", s)
+	}
+}
+
+func TestScan_CoworkPersistentAndSessionCoexist(t *testing.T) {
+	// Both the persistent skills-plugin tree AND ephemeral session skills
+	// should surface in the same inventory, distinguishable by their
+	// `source` field (global vs cowork-session).
+	home := t.TempDir()
+	appSupport := coworkAppSupportDir(home)
+	if appSupport == "" {
+		t.Skip("no cowork app-support dir on this OS")
+	}
+
+	persistentDir := filepath.Join(appSupport, "local-agent-mode-sessions",
+		"skills-plugin", "session-abc", "skills")
+	seedSkill(t, persistentDir, "pdf", "# pdf builtin")
+
+	ephemeralDir := filepath.Join(appSupport, "local-agent-mode-sessions",
+		"sess-a", "sess-b", "local_xyz", ".claude", "skills")
+	seedSkill(t, ephemeralDir, "incident-playbook", "# incident-playbook\nsession-built")
+
+	inv, _ := Scan(ScanOptions{Home: home})
+	counts := map[string]int{}
+	for _, s := range inv.Skills {
+		counts[s.Source]++
+	}
+	if counts["global"] != 1 {
+		t.Errorf("expected 1 global (persistent) cowork skill, got %d", counts["global"])
+	}
+	if counts["cowork-session"] != 1 {
+		t.Errorf("expected 1 cowork-session skill, got %d", counts["cowork-session"])
 	}
 }
 

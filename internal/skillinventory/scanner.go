@@ -203,15 +203,25 @@ func scanSkills(home, cwd string) []Skill {
 		}
 	}
 
-	// 5. Claude Cowork (Claude Desktop) persistent skills.
-	//
-	//    Only the `skills-plugin` subtree is scanned. Cowork's user-created
-	//    skills live under `local-agent-mode-sessions/.../local_<uuid>/...`
-	//    which are per-session and get garbage-collected on cleanup (see
-	//    anthropics/claude-code#31422). Scanning them would surface rows
-	//    that vanish within hours, so they are deliberately skipped.
+	// 5. Claude Cowork (Claude Desktop) persistent skills from the
+	//    `skills-plugin` subtree (survives session cleanup).
 	for _, skillPath := range walkCoworkSkills(home) {
 		add(skillPath, "global", PlatformClaudeDesktop)
+	}
+
+	// 6. Claude Cowork ephemeral session-scoped skills — skills the user
+	//    builds or loads inside a Cowork chat session. These live under
+	//    `local-agent-mode-sessions/<session>/.../local_<uuid>/.claude/skills/`
+	//    and get garbage-collected when the session is cleaned up
+	//    (anthropics/claude-code#31422). They are still worth reporting:
+	//    a skill that ran during a session is security-relevant even if
+	//    it vanishes later, and many Cowork users rely on this path for
+	//    real work because that's where the in-app skill-creator writes.
+	//    Tagged source="cowork-session" so the dashboard can distinguish
+	//    these transient skills from persistent ones and apply a TTL prune
+	//    if desired.
+	for _, skillPath := range walkCoworkSessionSkills(home) {
+		add(skillPath, "cowork-session", PlatformClaudeDesktop)
 	}
 
 	// Deterministic output so tests and diffs are stable.
@@ -404,10 +414,9 @@ func coworkDesktopConfigPath(home string) string {
 }
 
 // walkCoworkSkills returns paths to SKILL.md files inside the Cowork
-// persistent `skills-plugin` subtree. Ephemeral per-session skills under
-// `local-agent-mode-sessions/.../local_<uuid>/` are deliberately skipped —
-// they get garbage-collected on session cleanup (anthropics/claude-code#31422)
-// and surfacing them would produce phantom inventory rows.
+// persistent `skills-plugin` subtree — skills Anthropic ships with
+// Cowork plus skills promoted to persistent storage. Ephemeral per-session
+// skills are handled separately by walkCoworkSessionSkills.
 //
 // Structure (varies slightly between Cowork versions, so walk rather than
 // depending on a fixed glob depth):
@@ -447,6 +456,74 @@ func walkCoworkSkills(home string) []string {
 		// Must live under `/skills/<name>/SKILL.md`.
 		parent := filepath.Base(filepath.Dir(filepath.Dir(path)))
 		if parent != "skills" {
+			return nil
+		}
+		found = append(found, path)
+		return nil
+	})
+	return found
+}
+
+// walkCoworkSessionSkills returns paths to user-authored SKILL.md files
+// inside Cowork's per-session `local_<uuid>` directories. These skills are
+// ephemeral — Cowork garbage-collects them on session cleanup (see
+// anthropics/claude-code#31422) — but they are security-relevant while
+// they exist because an agent is actively using them, and customers who
+// rely on Cowork's in-app skill-creator expect to see these in their
+// inventory. Tagged source="cowork-session" upstream so the dashboard
+// can apply a TTL prune or render them distinctly from persistent skills.
+//
+// Structure (confirmed against ~/Library/Application Support/Claude on
+// macOS April 2026):
+//
+//	<appSupportDir>/local-agent-mode-sessions/<sessionA>/<sessionB>/local_<uuid>/.claude/skills/<name>/SKILL.md
+//
+// The required `/.claude/skills/<name>/SKILL.md` tail rejects false
+// positives like `local_<uuid>/uploads/SKILL.md` (user-uploaded files
+// that happen to be named SKILL.md but aren't skill manifests).
+func walkCoworkSessionSkills(home string) []string {
+	root := coworkAppSupportDir(home)
+	if root == "" {
+		return nil
+	}
+	sessionsRoot := filepath.Join(root, "local-agent-mode-sessions")
+	if _, err := os.Stat(sessionsRoot); err != nil {
+		return nil
+	}
+
+	var found []string
+	_ = filepath.WalkDir(sessionsRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// Cap walk depth. The path we target is 8 segments deep from
+		// sessionsRoot (`<sa>/<sb>/local_<uuid>/.claude/skills/<name>/SKILL.md`);
+		// allow some slack for future layout drift without descending
+		// unbounded.
+		if d.IsDir() {
+			rel, relErr := filepath.Rel(sessionsRoot, path)
+			if relErr == nil && strings.Count(rel, string(filepath.Separator)) > 8 {
+				return filepath.SkipDir
+			}
+			// Skip the persistent skills-plugin subtree — walkCoworkSkills
+			// handles that one with a different provenance tag.
+			if d.Name() == "skills-plugin" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() != "SKILL.md" {
+			return nil
+		}
+		// Require `.claude/skills/<name>/SKILL.md` tail. This is how we
+		// exclude `uploads/SKILL.md` (user-uploaded files that happen to
+		// share the name but aren't manifests).
+		skillsDir := filepath.Dir(filepath.Dir(path))       // → /.../<name>'s parent = skills dir
+		dotClaudeDir := filepath.Dir(skillsDir)             // → /.../.claude
+		if filepath.Base(skillsDir) != "skills" || filepath.Base(dotClaudeDir) != ".claude" {
 			return nil
 		}
 		found = append(found, path)
