@@ -92,8 +92,8 @@ the network call.`,
 			return nil
 		}
 		if verbose {
-			fmt.Fprintf(cmd.ErrOrStderr(), "scan-inventory: %d skills, %d MCP servers reported; response: %s\n",
-				len(inv.Skills), len(inv.MCPServers), truncateForLog(string(respBody), 120))
+			fmt.Fprintf(cmd.ErrOrStderr(), "scan-inventory: %d skills, %d MCP servers, %d plugins reported; response: %s\n",
+				len(inv.Skills), len(inv.MCPServers), len(inv.Plugins), truncateForLog(string(respBody), 120))
 		}
 		return nil
 	},

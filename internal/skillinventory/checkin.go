@@ -23,6 +23,7 @@ type CheckinPayload struct {
 	MachineID          string      `json:"machine_id,omitempty"`
 	InstalledSkills    []Skill     `json:"installed_skills"`
 	InstalledMCPServer []MCPServer `json:"installed_mcp_servers"`
+	InstalledPlugins   []Plugin    `json:"installed_plugins"`
 	Source             string      `json:"source,omitempty"` // "gateway-scan-inventory" for telemetry
 }
 
@@ -38,6 +39,7 @@ func BuildPayload(inv Inventory, cwd, claudeVersion, machineID string) CheckinPa
 		MachineID:          machineID,
 		InstalledSkills:    inv.Skills,
 		InstalledMCPServer: inv.MCPServers,
+		InstalledPlugins:   inv.Plugins,
 		Source:             "gateway-scan-inventory",
 	}
 }

@@ -60,6 +60,7 @@ type MCPServer struct {
 type Inventory struct {
 	Skills     []Skill     `json:"installed_skills"`
 	MCPServers []MCPServer `json:"installed_mcp_servers"`
+	Plugins    []Plugin    `json:"installed_plugins"`
 }
 
 // ScanOptions controls where the scanner looks.
@@ -87,6 +88,7 @@ func Scan(opts ScanOptions) (Inventory, error) {
 	inv := Inventory{
 		Skills:     scanSkills(home, opts.CWD),
 		MCPServers: scanMCPServers(home, opts.CWD),
+		Plugins:    ScanPlugins(home),
 	}
 	return inv, nil
 }
