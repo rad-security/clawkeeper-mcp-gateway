@@ -273,3 +273,140 @@ func TestBuildPayload_HasAllFields(t *testing.T) {
 		t.Errorf("skills/mcp arrays not passed through")
 	}
 }
+
+// --- Cowork (Claude Desktop) ------------------------------------------------
+
+// coworkAppSupportDir varies by runtime.GOOS, which we can't change at test
+// time. These tests seed whichever dir the current OS's helper would pick,
+// using the same helper so the test reflects production behavior.
+//
+// The helper is in the scanner package and already resolves the right dir
+// for the OS we're running on (macOS on dev, Linux in CI).
+
+func TestScan_CCPlatformTagOnAllCCEntries(t *testing.T) {
+	home := t.TempDir()
+	seedSkill(t, filepath.Join(home, ".claude", "skills"), "cc-skill", "# CC")
+	settings := map[string]any{
+		"mcpServers": map[string]any{
+			"gh": map[string]any{"command": "npx", "args": []string{"gh"}},
+		},
+	}
+	data, _ := json.Marshal(settings)
+	writeFile(t, filepath.Join(home, ".claude", "settings.json"), string(data))
+
+	inv, _ := Scan(ScanOptions{Home: home})
+
+	if len(inv.Skills) != 1 || inv.Skills[0].Platform != PlatformClaudeCode {
+		t.Errorf("CC skill should carry platform=claude_code; got %+v", inv.Skills)
+	}
+	if len(inv.MCPServers) != 1 || inv.MCPServers[0].Platform != PlatformClaudeCode {
+		t.Errorf("CC MCP server should carry platform=claude_code; got %+v", inv.MCPServers)
+	}
+}
+
+func TestScan_CoworkPersistentSkills(t *testing.T) {
+	home := t.TempDir()
+	appSupport := coworkAppSupportDir(home)
+	if appSupport == "" {
+		t.Skip("no cowork app-support dir on this OS")
+	}
+
+	// Persistent skill under skills-plugin/<session-id>/skills/<name>/SKILL.md
+	persistentDir := filepath.Join(appSupport, "local-agent-mode-sessions", "skills-plugin", "session-abc", "skills")
+	seedSkill(t, persistentDir, "compliance-auditor", "# Compliance Auditor\nAudits compliance.")
+
+	inv, err := Scan(ScanOptions{Home: home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inv.Skills) != 1 {
+		t.Fatalf("want 1 cowork skill, got %d: %+v", len(inv.Skills), inv.Skills)
+	}
+	s := inv.Skills[0]
+	if s.Name != "compliance-auditor" {
+		t.Errorf("wrong name: %q", s.Name)
+	}
+	if s.Platform != PlatformClaudeDesktop {
+		t.Errorf("cowork skill should carry platform=claude_desktop; got %q", s.Platform)
+	}
+	if s.Hash == "" || s.Preview == "" {
+		t.Errorf("cowork skill missing hash/preview")
+	}
+}
+
+func TestScan_CoworkEphemeralSessionSkillsSkipped(t *testing.T) {
+	home := t.TempDir()
+	appSupport := coworkAppSupportDir(home)
+	if appSupport == "" {
+		t.Skip("no cowork app-support dir on this OS")
+	}
+
+	// Ephemeral per-session skill under local_<uuid> — MUST NOT be scanned
+	// (anthropics/claude-code#31422).
+	ephemeralDir := filepath.Join(appSupport, "local-agent-mode-sessions", "sess-123", "local_abcdef", ".claude", "skills")
+	seedSkill(t, ephemeralDir, "user-scratch", "# User Scratch")
+
+	inv, _ := Scan(ScanOptions{Home: home})
+	for _, s := range inv.Skills {
+		if s.Name == "user-scratch" {
+			t.Errorf("ephemeral session skill must not be surfaced; got %+v", s)
+		}
+	}
+}
+
+func TestScan_CoworkMCPServersFromDesktopConfig(t *testing.T) {
+	home := t.TempDir()
+	cfgPath := coworkDesktopConfigPath(home)
+	if cfgPath == "" {
+		t.Skip("no cowork config path on this OS")
+	}
+
+	cfg := map[string]any{
+		"mcpServers": map[string]any{
+			"notion": map[string]any{"command": "npx", "args": []string{"@notionhq/mcp"}},
+			"remote": map[string]any{"type": "http", "url": "https://mcp.example.com"},
+		},
+	}
+	data, _ := json.Marshal(cfg)
+	writeFile(t, cfgPath, string(data))
+
+	inv, _ := Scan(ScanOptions{Home: home})
+	if len(inv.MCPServers) != 2 {
+		t.Fatalf("want 2 cowork mcp servers, got %d: %+v", len(inv.MCPServers), inv.MCPServers)
+	}
+	for _, s := range inv.MCPServers {
+		if s.Platform != PlatformClaudeDesktop {
+			t.Errorf("cowork mcp server should carry platform=claude_desktop; got %q for %s", s.Platform, s.Name)
+		}
+	}
+}
+
+func TestScan_MixedCCandCoworkCoexistByPlatform(t *testing.T) {
+	home := t.TempDir()
+	appSupport := coworkAppSupportDir(home)
+	if appSupport == "" {
+		t.Skip("no cowork app-support dir on this OS")
+	}
+
+	// Same skill NAME on both platforms — must be captured twice with
+	// distinct platform values so the server can preserve both.
+	seedSkill(t, filepath.Join(home, ".claude", "skills"), "aws-cli", "# CC AWS CLI")
+	seedSkill(
+		t,
+		filepath.Join(appSupport, "local-agent-mode-sessions", "skills-plugin", "s1", "skills"),
+		"aws-cli",
+		"# Cowork AWS CLI",
+	)
+
+	inv, _ := Scan(ScanOptions{Home: home})
+	if len(inv.Skills) != 2 {
+		t.Fatalf("same-name skills across platforms should yield 2 rows; got %d", len(inv.Skills))
+	}
+	platforms := map[string]bool{}
+	for _, s := range inv.Skills {
+		platforms[s.Platform] = true
+	}
+	if !platforms[PlatformClaudeCode] || !platforms[PlatformClaudeDesktop] {
+		t.Errorf("expected both platforms present; got %+v", platforms)
+	}
+}
