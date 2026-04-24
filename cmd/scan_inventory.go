@@ -101,7 +101,15 @@ the network call.`,
 
 // readHookEnvelope extracts cwd + claude_version from the JSON Claude Code pipes
 // on stdin for hook invocations. Best effort — never errors.
+//
+// When stdin is a TTY (interactive terminal) there is no hook envelope to
+// read, and io.ReadAll would block forever waiting for a non-existent EOF.
+// Skip the read in that case so that manually invoking `scan-inventory`
+// from a shell completes promptly instead of hanging.
 func readHookEnvelope(r io.Reader) (cwd, claudeVersion string) {
+	if isTerminal(r) {
+		return "", ""
+	}
 	data, err := io.ReadAll(io.LimitReader(r, 64*1024))
 	if err != nil || len(data) == 0 {
 		return "", ""
@@ -112,6 +120,22 @@ func readHookEnvelope(r io.Reader) (cwd, claudeVersion string) {
 	}
 	_ = json.Unmarshal(data, &env)
 	return env.CWD, env.ClaudeVersion
+}
+
+// isTerminal reports whether r is an *os.File attached to a character device
+// (terminal). Returns false for bytes.Buffers, pipes, regular files, and
+// anything that isn't an *os.File, so tests and hook invocations keep the
+// existing read path.
+func isTerminal(r io.Reader) bool {
+	f, ok := r.(*os.File)
+	if !ok {
+		return false
+	}
+	stat, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (stat.Mode() & os.ModeCharDevice) != 0
 }
 
 func truncateForLog(s string, n int) string {
@@ -129,5 +153,3 @@ func init() {
 	rootCmd.AddCommand(scanInventoryCmd)
 }
 
-// enforce symbols — keep os imported for future use without triggering linter
-var _ = os.Getenv
