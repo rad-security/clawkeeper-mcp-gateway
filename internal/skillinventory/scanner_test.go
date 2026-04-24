@@ -134,6 +134,87 @@ func TestScan_ManifestMissing_FallbackCacheGlob(t *testing.T) {
 	}
 }
 
+func TestScan_MarketplaceCachedSkills_SkillsUnderMarketplace(t *testing.T) {
+	// Real-world layout observed at customer (Ontra / secure-supply-chain):
+	//   ~/.claude/plugins/marketplaces/<marketplace>/skills/<skill>/SKILL.md
+	home := t.TempDir()
+	marketplaceSkillDir := filepath.Join(home, ".claude", "plugins", "marketplaces", "secure-supply-chain", "skills")
+	seedSkill(t, marketplaceSkillDir, "supply-chain-hardening", "# supply-chain-hardening\ncontent")
+	seedSkill(t, marketplaceSkillDir, "another-mkt-skill", "# another\ncontent")
+
+	inv, err := Scan(ScanOptions{Home: home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inv.Skills) != 2 {
+		t.Fatalf("want 2 marketplace skills, got %d: %+v", len(inv.Skills), inv.Skills)
+	}
+	for _, s := range inv.Skills {
+		if s.Source != "marketplace" {
+			t.Errorf("expected source=marketplace for %s, got %q", s.Name, s.Source)
+		}
+		if s.Platform != PlatformClaudeCode {
+			t.Errorf("expected platform=%s for %s, got %q", PlatformClaudeCode, s.Name, s.Platform)
+		}
+		if s.Hash == "" || s.Preview == "" {
+			t.Errorf("marketplace skill %s missing hash/preview", s.Name)
+		}
+	}
+}
+
+func TestScan_MarketplaceCachedSkills_PluginsNested(t *testing.T) {
+	// Alternate layout where a marketplace groups skills by plugin:
+	//   ~/.claude/plugins/marketplaces/<m>/plugins/<plugin>/skills/<skill>/SKILL.md
+	home := t.TempDir()
+	pluginSkillsDir := filepath.Join(home, ".claude", "plugins", "marketplaces", "some-mkt", "plugins", "scanner-plugin", "skills")
+	seedSkill(t, pluginSkillsDir, "nested-mkt-skill", "# nested\ncontent")
+
+	inv, _ := Scan(ScanOptions{Home: home})
+	if len(inv.Skills) != 1 {
+		t.Fatalf("want 1 nested-plugin marketplace skill, got %d", len(inv.Skills))
+	}
+	if inv.Skills[0].Source != "marketplace" {
+		t.Errorf("expected source=marketplace, got %q", inv.Skills[0].Source)
+	}
+	if inv.Skills[0].Name != "nested-mkt-skill" {
+		t.Errorf("expected name=nested-mkt-skill, got %q", inv.Skills[0].Name)
+	}
+}
+
+func TestScan_MarketplaceAndInstalledAreDistinct(t *testing.T) {
+	// When the same skill name exists in an installed plugin AND in a
+	// marketplace cache, both rows should surface (distinct source values).
+	home := t.TempDir()
+
+	// Installed plugin with a "shared" skill
+	installPath := filepath.Join(home, ".claude", "plugins", "cache", "org", "repo", "v1")
+	seedSkill(t, filepath.Join(installPath, "skills"), "shared", "# installed")
+	manifest := map[string]any{
+		"plugins": map[string]any{
+			"org/repo": []map[string]any{{"installPath": installPath, "scope": "user"}},
+		},
+	}
+	data, _ := json.Marshal(manifest)
+	writeFile(t, filepath.Join(home, ".claude", "plugins", "installed_plugins.json"), string(data))
+
+	// Marketplace-cached "shared" skill
+	seedSkill(t, filepath.Join(home, ".claude", "plugins", "marketplaces", "some-mkt", "skills"), "shared", "# marketplace")
+
+	inv, _ := Scan(ScanOptions{Home: home})
+	sourceCount := map[string]int{}
+	for _, s := range inv.Skills {
+		if s.Name == "shared" {
+			sourceCount[s.Source]++
+		}
+	}
+	if sourceCount["global"] != 1 {
+		t.Errorf("want 1 global-source `shared`, got %d", sourceCount["global"])
+	}
+	if sourceCount["marketplace"] != 1 {
+		t.Errorf("want 1 marketplace-source `shared`, got %d", sourceCount["marketplace"])
+	}
+}
+
 func TestScan_ProjectScopeSkills(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()

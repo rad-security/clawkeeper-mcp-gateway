@@ -198,6 +198,45 @@ func TestScan06_NoAPIKey_FailsOpen(t *testing.T) {
 	}
 }
 
+// SCAN-08: marketplace-cached skills are discovered end-to-end.
+// Regression test for the Ontra customer report — layout:
+//
+//	~/.claude/plugins/marketplaces/<marketplace>/skills/<skill>/SKILL.md
+//
+// The skill should appear in the payload with source="marketplace" even
+// when installed_plugins.json is empty (the marketplace cache is not a
+// formal "install").
+func TestScan08_MarketplaceCachedSkills(t *testing.T) {
+	home := t.TempDir()
+	marketplaceSkillDir := filepath.Join(home, ".claude", "plugins", "marketplaces", "secure-supply-chain", "skills", "supply-chain-hardening")
+	scanWriteFixture(t, filepath.Join(marketplaceSkillDir, "SKILL.md"), "# supply-chain-hardening\ncontent")
+
+	cmd := exec.Command(binary, "scan-inventory", "--dry-run")
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("error: %v\n%s", err, out)
+	}
+	var payload struct {
+		InstalledSkills []struct {
+			Name   string `json:"name"`
+			Source string `json:"source"`
+		} `json:"installed_skills"`
+	}
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("output invalid JSON: %v\n%s", err, out)
+	}
+	if len(payload.InstalledSkills) != 1 {
+		t.Fatalf("expected 1 marketplace skill, got %d: %+v", len(payload.InstalledSkills), payload.InstalledSkills)
+	}
+	if payload.InstalledSkills[0].Name != "supply-chain-hardening" {
+		t.Errorf("unexpected skill name: %q", payload.InstalledSkills[0].Name)
+	}
+	if payload.InstalledSkills[0].Source != "marketplace" {
+		t.Errorf("expected source=marketplace, got %q", payload.InstalledSkills[0].Source)
+	}
+}
+
 // SCAN-07: malformed settings.json doesn't crash.
 func TestScan07_MalformedSettingsDoesNotCrash(t *testing.T) {
 	home := t.TempDir()

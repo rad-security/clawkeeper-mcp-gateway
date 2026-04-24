@@ -95,11 +95,13 @@ func Scan(opts ScanOptions) (Inventory, error) {
 
 // scanSkills mirrors collect_skills() in plugin/skills/connect/SKILL.md.
 //
-// Four locations, in order:
-//  1. ~/.claude/skills/*/SKILL.md                            (global standalone)
-//  2. <cwd>/.claude/skills/*/SKILL.md                        (project standalone)
+// Locations, in order:
+//  1. ~/.claude/skills/*/SKILL.md                                    (global standalone)
+//  2. <cwd>/.claude/skills/*/SKILL.md                                (project standalone)
 //  3. plugin installs read from installed_plugins.json manifest, then fallback-globbed
-//  4. <cwd>/.claude/plugins/*/*/skills/*/SKILL.md            (project-level plugin installs)
+// 3c. ~/.claude/plugins/marketplaces/*/skills/*/SKILL.md             (marketplace-cached, "marketplace" source)
+//  4. <cwd>/.claude/plugins/*/*/skills/*/SKILL.md                    (project-level plugin installs)
+//  5. Cowork (Claude Desktop) persistent skills
 func scanSkills(home, cwd string) []Skill {
 	skills := []Skill{}
 	seen := map[string]bool{}
@@ -171,6 +173,27 @@ func scanSkills(home, cwd string) []Skill {
 		for _, f := range globSafe(cachePattern) {
 			add(f, "global", PlatformClaudeCode)
 		}
+	}
+
+	// 3c. Skills in Claude Code marketplace caches. When a user adds a
+	//     marketplace (e.g. `/plugin marketplace add`), Claude Code clones
+	//     the source repo under ~/.claude/plugins/marketplaces/<marketplace>/
+	//     regardless of which of its plugins they go on to `/plugin install`.
+	//     Teams sometimes use this tree directly as a source-of-truth for
+	//     available skills without the formal install step, so from a
+	//     security-posture standpoint the SKILL.md files on disk belong in
+	//     the inventory — tagged distinctly so the dashboard can distinguish
+	//     "installed" from "available via marketplace".
+	//
+	//     Two layouts observed in the wild:
+	//       marketplaces/<m>/skills/<skill>/SKILL.md
+	//       marketplaces/<m>/plugins/<plugin>/skills/<skill>/SKILL.md
+	marketplacesRoot := filepath.Join(home, ".claude", "plugins", "marketplaces")
+	for _, f := range globSafe(filepath.Join(marketplacesRoot, "*", "skills", "*", "SKILL.md")) {
+		add(f, "marketplace", PlatformClaudeCode)
+	}
+	for _, f := range globSafe(filepath.Join(marketplacesRoot, "*", "plugins", "*", "skills", "*", "SKILL.md")) {
+		add(f, "marketplace", PlatformClaudeCode)
 	}
 
 	// 4. Project-level plugin installs (rare but supported).
