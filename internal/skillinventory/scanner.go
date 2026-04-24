@@ -351,21 +351,20 @@ func Platform() string {
 //
 //	macOS:   ~/Library/Application Support/Claude
 //	Linux:   ~/.config/Claude
-//	Windows: %APPDATA%\Claude  (APPDATA is passed via env; fallback to home)
+//	Windows: <home>/AppData/Roaming/Claude
+//
+// Derived purely from `home` — we deliberately ignore XDG_CONFIG_HOME and
+// APPDATA env vars. Claude Desktop writes to the default path unconditionally
+// (confirmed from Anthropic docs), so env-derived overrides would point us
+// at the wrong tree in production and break test hermeticity in CI runners
+// that set those vars for other reasons.
 func coworkAppSupportDir(home string) string {
 	switch runtime.GOOS {
 	case "darwin":
 		return filepath.Join(home, "Library", "Application Support", "Claude")
 	case "linux":
-		// Respect XDG_CONFIG_HOME when set, else default to ~/.config.
-		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-			return filepath.Join(xdg, "Claude")
-		}
 		return filepath.Join(home, ".config", "Claude")
 	case "windows":
-		if appdata := os.Getenv("APPDATA"); appdata != "" {
-			return filepath.Join(appdata, "Claude")
-		}
 		return filepath.Join(home, "AppData", "Roaming", "Claude")
 	}
 	return ""
