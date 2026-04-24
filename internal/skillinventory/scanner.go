@@ -27,22 +27,33 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 )
 
-// Skill represents one installed Claude Code skill.
+// Platform discriminates Claude Code vs Claude Desktop (Cowork) inventory.
+// Empty/absent on wire is interpreted server-side as "claude_code" for
+// backwards compatibility with older gateway releases.
+const (
+	PlatformClaudeCode    = "claude_code"
+	PlatformClaudeDesktop = "claude_desktop"
+)
+
+// Skill represents one installed skill, from either agent surface.
 type Skill struct {
-	Name    string `json:"name"`
-	Source  string `json:"source"`  // "global" or "project"
-	Preview string `json:"preview"` // first 300 bytes of SKILL.md
-	Hash    string `json:"hash"`    // SHA-256 of SKILL.md
+	Name     string `json:"name"`
+	Source   string `json:"source"`   // "global" or "project"
+	Platform string `json:"platform"` // "claude_code" or "claude_desktop"
+	Preview  string `json:"preview"`  // first 300 bytes of SKILL.md
+	Hash     string `json:"hash"`     // SHA-256 of SKILL.md
 }
 
-// MCPServer represents one configured Claude Code MCP server.
+// MCPServer represents one configured MCP server, from either agent surface.
 type MCPServer struct {
-	Name    string `json:"name"`
-	Type    string `json:"type"`              // "stdio" or "http"
-	Command string `json:"command,omitempty"` // stdio: joined command+args
-	Source  string `json:"source"`            // "global" or "project"
+	Name     string `json:"name"`
+	Type     string `json:"type"`              // "stdio" or "http"
+	Command  string `json:"command,omitempty"` // stdio: joined command+args
+	Source   string `json:"source"`            // "global" or "project"
+	Platform string `json:"platform"`          // "claude_code" or "claude_desktop"
 }
 
 // Inventory is the full payload captured from this laptop.
@@ -93,22 +104,23 @@ func scanSkills(home, cwd string) []Skill {
 	skills := []Skill{}
 	seen := map[string]bool{}
 
-	add := func(skillMDPath, source string) {
+	add := func(skillMDPath, source, platform string) {
 		name := filepath.Base(filepath.Dir(skillMDPath))
-		key := name + "|" + source
+		key := name + "|" + source + "|" + platform
 		if seen[key] {
 			return
 		}
 		seen[key] = true
 		skills = append(skills, Skill{
-			Name:    name,
-			Source:  source,
-			Preview: readPreview(skillMDPath),
-			Hash:    hashFile(skillMDPath),
+			Name:     name,
+			Source:   source,
+			Platform: platform,
+			Preview:  readPreview(skillMDPath),
+			Hash:     hashFile(skillMDPath),
 		})
 	}
 
-	// 1 + 2. Well-known standalone locations
+	// 1 + 2. Well-known standalone locations (Claude Code)
 	for _, entry := range []struct {
 		pattern string
 		source  string
@@ -116,12 +128,12 @@ func scanSkills(home, cwd string) []Skill {
 		{filepath.Join(home, ".claude", "skills", "*", "SKILL.md"), "global"},
 	} {
 		for _, f := range globSafe(entry.pattern) {
-			add(f, entry.source)
+			add(f, entry.source, PlatformClaudeCode)
 		}
 	}
 	if cwd != "" {
 		for _, f := range globSafe(filepath.Join(cwd, ".claude", "skills", "*", "SKILL.md")) {
-			add(f, "project")
+			add(f, "project", PlatformClaudeCode)
 		}
 	}
 
@@ -147,7 +159,7 @@ func scanSkills(home, cwd string) []Skill {
 						source = "project"
 					}
 					for _, f := range globSafe(filepath.Join(inst.InstallPath, "skills", "*", "SKILL.md")) {
-						add(f, source)
+						add(f, source, PlatformClaudeCode)
 					}
 				}
 			}
@@ -157,19 +169,33 @@ func scanSkills(home, cwd string) []Skill {
 	if !manifestOK {
 		cachePattern := filepath.Join(home, ".claude", "plugins", "cache", "*", "*", "*", "skills", "*", "SKILL.md")
 		for _, f := range globSafe(cachePattern) {
-			add(f, "global")
+			add(f, "global", PlatformClaudeCode)
 		}
 	}
 
 	// 4. Project-level plugin installs (rare but supported).
 	if cwd != "" {
 		for _, f := range globSafe(filepath.Join(cwd, ".claude", "plugins", "*", "*", "skills", "*", "SKILL.md")) {
-			add(f, "project")
+			add(f, "project", PlatformClaudeCode)
 		}
+	}
+
+	// 5. Claude Cowork (Claude Desktop) persistent skills.
+	//
+	//    Only the `skills-plugin` subtree is scanned. Cowork's user-created
+	//    skills live under `local-agent-mode-sessions/.../local_<uuid>/...`
+	//    which are per-session and get garbage-collected on cleanup (see
+	//    anthropics/claude-code#31422). Scanning them would surface rows
+	//    that vanish within hours, so they are deliberately skipped.
+	for _, skillPath := range walkCoworkSkills(home) {
+		add(skillPath, "global", PlatformClaudeDesktop)
 	}
 
 	// Deterministic output so tests and diffs are stable.
 	sort.Slice(skills, func(i, j int) bool {
+		if skills[i].Platform != skills[j].Platform {
+			return skills[i].Platform < skills[j].Platform
+		}
 		if skills[i].Source != skills[j].Source {
 			return skills[i].Source < skills[j].Source
 		}
@@ -182,22 +208,29 @@ func scanSkills(home, cwd string) []Skill {
 // --- MCP servers ------------------------------------------------------------
 
 // scanMCPServers mirrors collect_mcp() — reads mcpServers from each of the
-// three settings.json locations and flattens them into a single list.
+// three Claude Code settings.json locations, then the Claude Desktop
+// claude_desktop_config.json, flattening into a single list with a
+// `platform` discriminator per entry.
 func scanMCPServers(home, cwd string) []MCPServer {
 	servers := []MCPServer{}
 	seen := map[string]bool{}
 
 	sources := []struct {
-		scope string
-		path  string
+		scope    string
+		path     string
+		platform string
 	}{
-		{"global", filepath.Join(home, ".claude", "settings.json")},
+		{"global", filepath.Join(home, ".claude", "settings.json"), PlatformClaudeCode},
 	}
 	if cwd != "" {
 		sources = append(sources,
-			struct{ scope, path string }{"project", filepath.Join(cwd, ".claude", "settings.json")},
-			struct{ scope, path string }{"project", filepath.Join(cwd, ".claude", "settings.local.json")},
+			struct{ scope, path, platform string }{"project", filepath.Join(cwd, ".claude", "settings.json"), PlatformClaudeCode},
+			struct{ scope, path, platform string }{"project", filepath.Join(cwd, ".claude", "settings.local.json"), PlatformClaudeCode},
 		)
+	}
+	// Claude Cowork (Claude Desktop) config. One canonical path per OS.
+	if p := coworkDesktopConfigPath(home); p != "" {
+		sources = append(sources, struct{ scope, path, platform string }{"global", p, PlatformClaudeDesktop})
 	}
 
 	for _, src := range sources {
@@ -217,7 +250,7 @@ func scanMCPServers(home, cwd string) []MCPServer {
 			continue
 		}
 		for name, cfg := range settings.MCPServers {
-			key := name + "|" + src.scope
+			key := name + "|" + src.scope + "|" + src.platform
 			if seen[key] {
 				continue
 			}
@@ -238,16 +271,20 @@ func scanMCPServers(home, cwd string) []MCPServer {
 				}
 			}
 			servers = append(servers, MCPServer{
-				Name:    name,
-				Type:    serverType,
-				Command: command,
-				Source:  src.scope,
+				Name:     name,
+				Type:     serverType,
+				Command:  command,
+				Source:   src.scope,
+				Platform: src.platform,
 			})
 		}
 	}
 
 	// Deterministic.
 	sort.Slice(servers, func(i, j int) bool {
+		if servers[i].Platform != servers[j].Platform {
+			return servers[i].Platform < servers[j].Platform
+		}
 		if servers[i].Source != servers[j].Source {
 			return servers[i].Source < servers[j].Source
 		}
@@ -305,4 +342,92 @@ func globSafe(pattern string) []string {
 // later; for now keep it identical.)
 func Platform() string {
 	return runtime.GOOS
+}
+
+// --- Cowork (Claude Desktop) -----------------------------------------------
+
+// coworkAppSupportDir returns the OS-canonical Claude Desktop application
+// support directory for the current user. Returns "" on unsupported OSes.
+//
+//	macOS:   ~/Library/Application Support/Claude
+//	Linux:   ~/.config/Claude
+//	Windows: <home>/AppData/Roaming/Claude
+//
+// Derived purely from `home` — we deliberately ignore XDG_CONFIG_HOME and
+// APPDATA env vars. Claude Desktop writes to the default path unconditionally
+// (confirmed from Anthropic docs), so env-derived overrides would point us
+// at the wrong tree in production and break test hermeticity in CI runners
+// that set those vars for other reasons.
+func coworkAppSupportDir(home string) string {
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support", "Claude")
+	case "linux":
+		return filepath.Join(home, ".config", "Claude")
+	case "windows":
+		return filepath.Join(home, "AppData", "Roaming", "Claude")
+	}
+	return ""
+}
+
+// coworkDesktopConfigPath returns the absolute path to
+// claude_desktop_config.json for the current OS, or "" if unsupported.
+func coworkDesktopConfigPath(home string) string {
+	dir := coworkAppSupportDir(home)
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "claude_desktop_config.json")
+}
+
+// walkCoworkSkills returns paths to SKILL.md files inside the Cowork
+// persistent `skills-plugin` subtree. Ephemeral per-session skills under
+// `local-agent-mode-sessions/.../local_<uuid>/` are deliberately skipped —
+// they get garbage-collected on session cleanup (anthropics/claude-code#31422)
+// and surfacing them would produce phantom inventory rows.
+//
+// Structure (varies slightly between Cowork versions, so walk rather than
+// depending on a fixed glob depth):
+//
+//	<appSupportDir>/local-agent-mode-sessions/skills-plugin/<...>/skills/<name>/SKILL.md
+func walkCoworkSkills(home string) []string {
+	root := coworkAppSupportDir(home)
+	if root == "" {
+		return nil
+	}
+	sessionsRoot := filepath.Join(root, "local-agent-mode-sessions", "skills-plugin")
+	if _, err := os.Stat(sessionsRoot); err != nil {
+		return nil
+	}
+
+	var found []string
+	_ = filepath.WalkDir(sessionsRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			// Unreadable directory — skip quietly (fail-open).
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// Cap walk depth — the skills-plugin tree is shallow, runaway symlinks
+		// or enormous per-session dirs should not lock the hook.
+		if d.IsDir() {
+			rel, relErr := filepath.Rel(sessionsRoot, path)
+			if relErr == nil && strings.Count(rel, string(filepath.Separator)) > 6 {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() != "SKILL.md" {
+			return nil
+		}
+		// Must live under `/skills/<name>/SKILL.md`.
+		parent := filepath.Base(filepath.Dir(filepath.Dir(path)))
+		if parent != "skills" {
+			return nil
+		}
+		found = append(found, path)
+		return nil
+	})
+	return found
 }
