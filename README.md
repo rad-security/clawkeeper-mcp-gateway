@@ -1,3 +1,7 @@
+> [!WARNING]
+> **Deprecated — this repository is archived and no longer maintained.**
+> Clawkeeper is now [AgentKeeper](https://agentkeeper.dev). See [Clawkeeper is now AgentKeeper](https://agentkeeper.dev/clawkeeper-transition).
+
 # Clawkeeper MCP Gateway
 
 Open-source MCP gateway with threat detection, warn mode, and fail-open design.
